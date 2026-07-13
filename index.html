@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cohesively Cashflow — Reisterrassen</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<canvas id="ambient"></canvas>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg">
+        <defs><linearGradient id="blg" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#38f9d7"/><stop offset="1" stop-color="#43a0ff"/>
+        </linearGradient></defs>
+        <!-- drei Terrassen -->
+        <path d="M4 32 h32 v4 h-32 z" fill="url(#blg)" opacity="0.5" rx="2"/>
+        <path d="M10 22 h26 v4 h-26 z" fill="url(#blg)" opacity="0.75"/>
+        <path d="M18 12 h18 v4 h-18 z" fill="url(#blg)"/>
+        <circle cx="10" cy="9" r="3" fill="#38f9d7" opacity="0.9"/>
+      </svg>
+      <div>
+        <h1>cohesively <span>cashflow</span></h1>
+        <div class="sub">Schutz · Sicherheit · Freiheit — deine Reisterrassen</div>
+      </div>
+    </div>
+    <nav class="tabs" id="nav"></nav>
+    <span id="staleChip" class="chip">…</span>
+  </header>
+  <main id="app"></main>
+</div>
+<div id="toast"></div>
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

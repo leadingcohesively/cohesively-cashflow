@@ -1,0 +1,10 @@
+# Interne Dokumente & Rohdaten — bleiben lokal, nie ins öffentliche Repo
+*.xlsx
+seed_data.json
+CONCEPT.md
+GTM-ROADMAP.md
+KURSINHALTE.md
+ONBOARDING-FLOW.md
+.claude/
+.DS_Store
+*.docx
