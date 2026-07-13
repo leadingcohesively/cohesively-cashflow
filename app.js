@@ -1204,6 +1204,8 @@ function rData() {
       </div>
     </div>
 
+    ${csvCard()}
+
     <div class="card s12">
       <div class="ct">Deine Daten <span class="hint">alles bleibt lokal in diesem Browser — sichern nicht vergessen</span></div>
       <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
@@ -1223,6 +1225,195 @@ function dataAddAccount() {
   if (!name) { toast("Bitte einen Kontonamen angeben."); return; }
   state.accounts.push({ name, type: document.getElementById("d-acc-type").value, owner: document.getElementById("d-acc-person").value, balance: parseFloat(document.getElementById("d-acc-bal").value) || 0 });
   saveState(state); toast("Konto angelegt ✓"); render();
+}
+
+/* ================= CSV-Import (Kontoauszug) =================
+   Jede Bank exportiert anders: Trennzeichen, Encoding und Spalten werden erkannt
+   bzw. per Mapping zugeordnet; Kategorien werden aus dem Verwendungszweck geraten
+   und sind pro Zeile korrigierbar. */
+let csv = null; // { fileName, rows, header, map:{date,amount,title}, parsed }
+
+const CAT_KEYWORDS = [
+  [/rewe|edeka|aldi|lidl|netto|penny|kaufland|supermarkt|baecker|bäcker|lebensmittel/i, "Lebenshaltung"],
+  [/dm |dm-|rossmann|mueller|müller drogerie|apotheke|drogerie/i, "Drogerie & Pflege"],
+  [/tank|aral|shell|esso|jet |total|db |bahn|hvv|mvg|bvg|ticket|parken/i, "Mobilität"],
+  [/miete|nebenkosten|strom|gas|stadtwerke|wasser/i, "Lebenshaltung"],
+  [/versicherung|allianz|huk|axa|ergo/i, "Versicherungen"],
+  [/telekom|vodafone|o2|1und1|mobilfunk|internet/i, "Handy/Internet"],
+  [/restaurant|cafe|café|pizza|lieferando|gastro|baristo|eis/i, "Freizeit & Genuss"],
+  [/amazon|zalando|otto |hm |h&m|zara|shopping/i, "Shopping"],
+  [/kino|netflix|spotify|disney|theater|konzert|museum/i, "Kultur & Entertainment"],
+  [/kita|betreuung|hort|tagesmutter/i, "Betreuung"],
+  [/arzt|zahnarzt|praxis|physio/i, "Gesundheit"],
+  [/ikea|obi|bauhaus|hornbach|moebel|möbel|deko/i, "Wohnen & Deko"]
+];
+function guessCat(text) {
+  for (const [re, cat] of CAT_KEYWORDS) if (re.test(text)) return cat;
+  return "Lebenshaltung";
+}
+
+function csvParseText(text) {
+  const lines = text.split(/\r\n|\n|\r/).filter(l => l.trim().length);
+  if (!lines.length) return [];
+  const probe = lines.slice(0, 5).join("\n");
+  const delim = [";", ",", "\t"].map(d => [d, probe.split(d).length]).sort((a, b) => b[1] - a[1])[0][0];
+  return lines.map(line => {
+    const out = []; let cur = "", inQ = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (c === '"') { if (inQ && line[i + 1] === '"') { cur += '"'; i++; } else inQ = !inQ; }
+      else if (c === delim && !inQ) { out.push(cur); cur = ""; }
+      else cur += c;
+    }
+    out.push(cur);
+    return out.map(s => s.trim());
+  });
+}
+
+function parseAmountDE(s) {
+  if (typeof s !== "string") return NaN;
+  s = s.replace(/[€\s]/g, "");
+  if (/,\d{1,2}$/.test(s)) s = s.replace(/\./g, "").replace(",", ".");
+  else s = s.replace(/,/g, "");
+  const v = parseFloat(s);
+  return isNaN(v) ? NaN : v;
+}
+function parseDateToMonth(s) {
+  let m = /^(\d{1,2})\.(\d{1,2})\.(\d{2,4})/.exec(s);
+  if (m) { const y = m[3].length === 2 ? "20" + m[3] : m[3]; return `${y}-${m[2].padStart(2, "0")}`; }
+  m = /^(\d{4})-(\d{2})/.exec(s);
+  if (m) return `${m[1]}-${m[2]}`;
+  return null;
+}
+
+function csvFile(ev) {
+  const file = ev.target.files[0];
+  if (!file) return;
+  const read = enc => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (enc === "utf-8" && reader.result.includes("�")) { read("ISO-8859-1"); return; } // Umlaute kaputt → Latin-1
+      const rows = csvParseText(reader.result);
+      if (rows.length < 2) { toast("CSV enthält keine Datenzeilen."); return; }
+      // Spalten raten: Datum = erste Spalte mit Datumsformat, Betrag = letzte Spalte mit Zahlformat, Titel = längste Textspalte
+      const sample = rows.slice(1, Math.min(rows.length, 8));
+      const nCols = rows[0].length;
+      let dateCol = 0, amountCol = nCols - 1, titleCol = 0, bestLen = -1;
+      for (let c = 0; c < nCols; c++) {
+        const vals = sample.map(r => r[c] || "");
+        if (vals.some(v => parseDateToMonth(v)) && dateCol === 0) dateCol = c;
+        if (vals.every(v => !isNaN(parseAmountDE(v)) || v === "")) amountCol = c;
+        const avgLen = vals.reduce((s, v) => s + (isNaN(parseAmountDE(v)) && !parseDateToMonth(v) ? v.length : 0), 0);
+        if (avgLen > bestLen) { bestLen = avgLen; titleCol = c; }
+      }
+      csv = { fileName: file.name, rows, map: { date: dateCol, amount: amountCol, title: titleCol }, parsed: null };
+      render();
+    };
+    reader.readAsText(file, enc);
+  };
+  read("utf-8");
+  ev.target.value = "";
+}
+
+function csvRemap(which, col) { csv.map[which] = parseInt(col); render(); }
+
+function csvPreviewRows() {
+  const out = [];
+  csv.rows.slice(1).forEach(r => {
+    const month = parseDateToMonth(r[csv.map.date] || "");
+    const amount = parseAmountDE(r[csv.map.amount] || "");
+    if (!month || isNaN(amount) || amount === 0) return;
+    const title = (r[csv.map.title] || "").slice(0, 60) || "CSV-Buchung";
+    out.push({ month, amount, title, cat: guessCat(title), include: true });
+  });
+  return out;
+}
+
+function csvApply() { csv.parsed = csvPreviewRows(); render(); }
+function csvCancel() { csv = null; render(); }
+function csvToggle(i) { csv.parsed[i].include = !csv.parsed[i].include; render(); }
+function csvSetCat(i, cat) { csv.parsed[i].cat = cat; }
+
+function csvImportRun() {
+  const account = document.getElementById("csv-account").value;
+  const person = document.getElementById("csv-person").value;
+  const asIncome = document.getElementById("csv-income").checked;
+  let nOut = 0, nIn = 0;
+  csv.parsed.forEach(p => {
+    if (!p.include) return;
+    if (p.amount < 0) {
+      const cat = p.cat;
+      state.items.push({ month: p.month, amount: -p.amount, title: p.title, cat, bucket: state.catMap[cat] || "Wants", source: "CSV-Import", account, person });
+      nOut++;
+    } else if (asIncome) {
+      state.incomes.push({ month: p.month, amount: p.amount, title: p.title, freq: "einmalig", person, account });
+      nIn++;
+    }
+  });
+  saveState(state);
+  csv = null;
+  toast(`CSV importiert ✓ — ${nOut} Ausgaben${nIn ? `, ${nIn} Einnahmen` : ""}.`);
+  render();
+}
+
+function csvCard() {
+  const cats = Object.keys(state.catMap);
+  if (!csv) return `<div class="card s12 input-surface">
+    <div class="ct">CSV-Import · Kontoauszug <span class="hint">Bank-Export einlesen statt abtippen</span></div>
+    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <label class="btn" style="cursor:pointer">📄 CSV-Datei wählen<input type="file" accept=".csv,text/csv" style="display:none" onchange="csvFile(event)"></label>
+      <span class="small muted">Export aus dem Online-Banking (CSV). Trennzeichen, Encoding und Spalten erkennt das Tool selbst — du prüfst nur kurz nach.</span>
+    </div>
+  </div>`;
+
+  if (!csv.parsed) {
+    const header = csv.rows[0];
+    const preview = csv.rows.slice(1, 5);
+    const colSel = which => `<select onchange="csvRemap('${which}',this.value)">${header.map((h, i) =>
+      `<option value="${i}" ${csv.map[which] === i ? "selected" : ""}>${esc(h || "Spalte " + (i + 1))}</option>`).join("")}</select>`;
+    return `<div class="card s12 input-surface">
+      <div class="ct">CSV-Import · Spalten zuordnen <span class="hint">${esc(csv.fileName)} · ${csv.rows.length - 1} Zeilen</span></div>
+      <div class="formgrid">
+        <label>Datum${colSel("date")}</label>
+        <label>Betrag${colSel("amount")}</label>
+        <label>Verwendungszweck / Titel${colSel("title")}</label>
+      </div>
+      <div class="scroll-x mt"><table class="data">
+        <tr>${header.map(h => `<th>${esc(h)}</th>`).join("")}</tr>
+        ${preview.map(r => `<tr>${r.map(v => `<td class="muted">${esc(String(v).slice(0, 30))}</td>`).join("")}</tr>`).join("")}
+      </table></div>
+      <div class="mt" style="display:flex;gap:10px">
+        <button class="btn" onclick="csvApply()">Weiter: Buchungen prüfen →</button>
+        <button class="btn ghost" onclick="csvCancel()">Abbrechen</button>
+      </div>
+    </div>`;
+  }
+
+  const rows = csv.parsed;
+  const shown = rows.slice(0, 300);
+  return `<div class="card s12 input-surface">
+    <div class="ct">CSV-Import · Prüfen & übernehmen <span class="hint">${rows.filter(r => r.include).length} von ${rows.length} Buchungen ausgewählt</span></div>
+    <div class="formgrid">
+      <label>Konto<select id="csv-account">${state.accounts.map(a => `<option ${a.name === state.ui.lastAccount ? "selected" : ""}>${esc(a.name)}</option>`).join("")}</select></label>
+      <label>Person<select id="csv-person">${personOptions(state.ui.lastPerson)}</select></label>
+      <label style="flex-direction:row;align-items:center;gap:8px;text-transform:none;letter-spacing:0">
+        <input type="checkbox" id="csv-income" checked style="width:auto"> positive Beträge als Einnahmen</label>
+    </div>
+    <div class="scroll-x mt" style="max-height:340px;overflow-y:auto"><table class="data">
+      <tr><th></th><th>Monat</th><th class="num">Betrag</th><th>Titel</th><th>Kategorie (bei Ausgaben)</th></tr>
+      ${shown.map((p, i) => `<tr style="${p.include ? "" : "opacity:0.35"}">
+        <td><input type="checkbox" ${p.include ? "checked" : ""} onchange="csvToggle(${i})" style="width:auto"></td>
+        <td>${p.month}</td>
+        <td class="num ${p.amount < 0 ? "" : "pos"}">${fmt(p.amount, true)}</td>
+        <td class="small">${esc(p.title)}</td>
+        <td>${p.amount < 0 ? `<select onchange="csvSetCat(${i},this.value)">${cats.map(c => `<option ${c === p.cat ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>` : `<span class="muted small">Einnahme</span>`}</td>
+      </tr>`).join("")}
+    </table>${rows.length > 300 ? `<div class="small muted" style="padding:8px">… ${rows.length - 300} weitere Zeilen werden mit übernommen.</div>` : ""}</div>
+    <div class="mt" style="display:flex;gap:10px">
+      <button class="btn" onclick="csvImportRun()">${rows.filter(r => r.include).length} Buchungen importieren</button>
+      <button class="btn ghost" onclick="csvCancel()">Abbrechen</button>
+    </div>
+  </div>`;
 }
 
 function exportData() {
