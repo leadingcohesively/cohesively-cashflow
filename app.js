@@ -155,9 +155,10 @@ function terraces(g = "Gesamt") {
   return {
     group: g, fix, liq, cf, wants, living,
     passive: state.goals.passiveIncome || 0,
-    protection: Object.assign(mk("Schutz", Math.max(100, Math.ceil(F.schutz * fix / 100) * 100)), { monthsCovered: fix > 0 ? liq / fix : null }),
-    security: mk("Sicherheit", F.sicherheit * fix),
-    freedom: mk("Freiheit", F.freiheit * wants)
+    // Ziel = 0 heißt: Basis fehlt noch — die UI zeigt dann Guiding statt Formel-Artefakte
+    protection: Object.assign(mk("Schutz", fix > 0 ? Math.max(100, Math.ceil(F.schutz * fix / 100) * 100) : 0), { monthsCovered: fix > 0 ? liq / fix : null }),
+    security: mk("Sicherheit", fix > 0 ? F.sicherheit * fix : 0),
+    freedom: mk("Freiheit", wants > 0 ? F.freiheit * wants : 0)
   };
 }
 
@@ -240,25 +241,94 @@ function animateCounts() {
   });
 }
 
-/* ================= Verdict (Haushaltsebene) ================= */
+/* ================= Verdict (Haushaltsebene) =================
+   Jeder Verdict endet in einer klickbaren Stellschraube — Einsicht ohne Hebel gibt es nicht. */
 function verdict() {
   const T = terraces();
+  if (!state.accounts.length) return {
+    cls: "fair",
+    head: "Willkommen — dein System wartet auf sein Fundament.",
+    why: "Lege zuerst Konten, Einnahmen und Fixkosten an. Daraus entstehen deine Terrassen-Ziele — nur was du ansiehst, kannst du lenken.",
+    ctaLabel: "Setup starten →", cta: "startSetup()"
+  };
+  if (T.fix <= 0) return {
+    cls: "fair",
+    head: "Deine Terrassen brauchen ein Fundament: deine Fixkosten.",
+    why: `Aus ihnen entsteht dein Schutz-Ziel (${state.goals.factors.schutz} × Fixkosten). Erfasse Miete, Versicherungen, Abos — Jahresbeträge rechnen wir automatisch auf den Monat um.`,
+    ctaLabel: "Fixkosten erfassen →", cta: "gotoFixed()"
+  };
   if (T.liq < 0) return {
     cls: "poor",
     head: "Der Regen versickert: Deine liquiden Mittel sind negativ.",
-    why: `${fmt(T.liq)} über alle Giro- & Tagesgeldkonten. In den Schutz-Becken liegen zwar ${fmt(T.protection.value)}, aber echtes Wasser hält die Terrasse erst, wenn die Konten über null sind.`
+    why: `${fmt(T.liq)} über alle Giro- & Tagesgeldkonten. In den Schutz-Becken liegen zwar ${fmt(T.protection.value)}, aber echtes Wasser hält die Terrasse erst, wenn die Konten über null sind.`,
+    ctaLabel: "Konten & Salden prüfen →", cta: "setView('daten')"
   };
   if (T.protection.progress < 1) return {
     cls: "fair",
     head: `Priorität: Schutz-Terrasse füllen — noch ${fmt(T.protection.goal - T.protection.value)} bis ${state.goals.factors.schutz} Monate Fixkosten gedeckt sind.`,
-    why: `Ziel ${fmt(T.protection.goal)} = ${state.goals.factors.schutz} × ${fmt(T.fix)} Fixkosten. Angespart in Schutz-Zielen: ${fmt(T.protection.value)}.`
+    why: `Ziel ${fmt(T.protection.goal)} = ${state.goals.factors.schutz} × ${fmt(T.fix)} Fixkosten. Angespart in Schutz-Zielen: ${fmt(T.protection.value)}.`,
+    ctaLabel: "Auf Schutz-Ziel einzahlen →", cta: "gotoDeposit()"
   };
   if (T.security.progress < 1) return {
     cls: "good",
     head: "Schutz steht ✓ — jetzt füllt sich die Sicherheits-Terrasse.",
-    why: `${fmt(T.security.value)} von ${fmt(T.security.goal)} (${state.goals.factors.sicherheit} × Fixkosten) angespart.`
+    why: `${fmt(T.security.value)} von ${fmt(T.security.goal)} (${state.goals.factors.sicherheit} × Fixkosten) angespart.`,
+    ctaLabel: "Sparziele ansehen →", cta: "setView('terrassen')"
   };
-  return { cls: "excellent", head: "Willkommen im Schöpfermodus — deine Terrassen tragen.", why: `Freiheits-Fortschritt: ${pct(T.freedom.progress)}.` };
+  return {
+    cls: "excellent", head: "Willkommen im Schöpfermodus — deine Terrassen tragen.",
+    why: `Freiheits-Fortschritt: ${pct(T.freedom.progress)}.`,
+    ctaLabel: "Wunschliste ansehen →", cta: "setView('wishlist')"
+  };
+}
+
+function verdictHTML(v) {
+  return `<div class="verdict ${v.cls}">
+    <div style="flex:1;min-width:240px"><span class="headline">${v.head}</span><br><span class="why">${v.why}</span></div>
+    ${v.ctaLabel ? `<button class="btn" style="align-self:center" onclick="${v.cta}">${v.ctaLabel}</button>` : ""}
+  </div>`;
+}
+function startSetup() { obStep = 1; view = "onboarding"; render(); }
+function gotoFixed() { formType = "fixed"; setView("buchungen"); }
+function gotoDeposit() { formType = "goal"; setView("buchungen"); }
+
+/* „Monat übernehmen“ — Recurring light: pro Posten der jeweils letzte monatliche Stand
+   wird in den aktuellen Monat geholt (robust auch bei lückiger Historie) */
+function recurringLatest() {
+  const pick = arr => {
+    const seen = {};
+    arr.forEach(r => {
+      if (r.freq !== "monatlich" || r.month >= NOW_MONTH) return;
+      const key = (r.title || r.cat || "") + "|" + (r.person || "");
+      if (!seen[key] || r.month > seen[key].month) seen[key] = r;
+    });
+    return Object.values(seen);
+  };
+  return { inc: pick(state.incomes), fix: pick(state.fixed) };
+}
+function carryCandidate() {
+  if ([...state.incomes, ...state.fixed].some(r => r.month === NOW_MONTH)) return null;
+  const { inc, fix } = recurringLatest();
+  return inc.length + fix.length ? { inc: inc.length, fix: fix.length } : null;
+}
+function carryOverRun() {
+  const c = carryCandidate();
+  if (!c) return;
+  const { inc, fix } = recurringLatest();
+  inc.forEach(r => state.incomes.push({ ...r, month: NOW_MONTH }));
+  fix.forEach(r => state.fixed.push({ ...r, month: NOW_MONTH }));
+  saveState(state);
+  toast(`✓ ${c.inc + c.fix} wiederkehrende Buchungen nach ${mLabel(NOW_MONTH)} übernommen — passe bewusst an, was sich verändert hat.`);
+  render();
+}
+function carryBanner() {
+  const c = carryCandidate();
+  if (!c) return "";
+  return `<div class="verdict" style="border-color:rgba(67,160,255,0.45);background:linear-gradient(120deg,rgba(67,160,255,0.12),rgba(56,249,215,0.05))">
+    <div style="flex:1;min-width:240px"><span class="headline">Neuer Monat, gleiches Fundament.</span><br>
+    <span class="why">${mLabel(NOW_MONTH)} ist noch leer. Übernimm deine wiederkehrenden Buchungen (${c.inc} Einnahme${c.inc === 1 ? "" : "n"}, ${c.fix} Fixkosten — jeweils der letzte Stand). Quartals- und Jahresposten prüfst du bewusst selbst.</span></div>
+    <button class="btn" style="align-self:center" onclick="carryOverRun()">Monat übernehmen →</button>
+  </div>`;
 }
 
 function sparkline(values, w = 560, h = 120) {
@@ -341,7 +411,8 @@ function rDashboard() {
 
   app.innerHTML = `
   ${groupPills(g, "setGroup")}
-  <div class="verdict ${v.cls}"><span class="headline">${v.head}</span><span class="why">${v.why}</span></div>
+  ${verdictHTML(v)}
+  ${carryBanner()}
   <div class="grid">
     <div class="card s3 stat">
       <div class="label">Ø Cashflow / Monat</div>
@@ -387,9 +458,9 @@ function rDashboard() {
     <div class="card s12">
       <div class="ct">Die Reisterrassen <span class="hint">${groupLabel(g)} · dein Weg: Schutz → Sicherheit → Freiheit</span></div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px">
-        ${miniTerrace("1 · Finanzieller Schutz", T.protection.progress, `${fmt(T.protection.value)} von ${fmt(T.protection.goal)}`, PHASE_COPY.Schutz.lead)}
-        ${miniTerrace("2 · Finanzielle Sicherheit", T.security.progress, `${fmt(T.security.value)} von ${fmt(T.security.goal)}`, PHASE_COPY.Sicherheit.lead)}
-        ${miniTerrace("3 · Finanzielle Freiheit", T.freedom.progress, `${fmt(T.freedom.value)} von ${fmt(T.freedom.goal)}`, PHASE_COPY.Freiheit.lead)}
+        ${miniTerrace("1 · Finanzieller Schutz", T.protection.progress, T.protection.goal ? `${fmt(T.protection.value)} von ${fmt(T.protection.goal)}` : "Ziel entsteht aus deinen Fixkosten", PHASE_COPY.Schutz.lead)}
+        ${miniTerrace("2 · Finanzielle Sicherheit", T.security.progress, T.security.goal ? `${fmt(T.security.value)} von ${fmt(T.security.goal)}` : "Ziel entsteht aus deinen Fixkosten", PHASE_COPY.Sicherheit.lead)}
+        ${miniTerrace("3 · Finanzielle Freiheit", T.freedom.progress, T.freedom.goal ? `${fmt(T.freedom.value)} von ${fmt(T.freedom.goal)}` : "Ziel entsteht aus deinen Wunschausgaben", PHASE_COPY.Freiheit.lead)}
       </div>
       <div class="mt"><button class="btn" onclick="setView('terrassen')">Zu den Reisterrassen →</button></div>
     </div>
@@ -502,9 +573,9 @@ function terraceCard(key, T, sub) {
     ${gauge(t.progress, t.phase)}
     <div class="tile mt">
       <div class="small" style="line-height:1.7">
-        Angespart: <b>${fmt(t.value)}</b> · Ziel: <b>${fmt(t.goal)}</b><br>
+        Angespart: <b>${fmt(t.value)}</b> · Ziel: <b>${t.goal ? fmt(t.goal) : "— entsteht aus deinen Daten"}</b><br>
         ${sub}
-        Zeit bis Ziel: <b>${t.monthsTo == null ? (t.progress >= 1 ? "erreicht ✓" : "– (keine Sparrate)") : Math.ceil(t.monthsTo) + " Monate"}</b>
+        Zeit bis Ziel: <b>${t.monthsTo == null ? (t.progress >= 1 && t.goal ? "erreicht ✓" : "– (keine Sparrate)") : Math.ceil(t.monthsTo) + " Monate"}</b>
       </div>
     </div>
     <div class="small mt" style="line-height:1.55"><b>${copy.lead}</b> <span class="muted">${copy.body}</span></div>
@@ -518,7 +589,7 @@ function rTerraces() {
   const unassigned = state.savingGoals.filter(s => !s.phase && inGroup(s.person, g));
   app.innerHTML = `
   ${groupPills(g, "setTerraceGroup")}
-  <div class="verdict ${v.cls}"><span class="headline">${v.head}</span><span class="why">${v.why}</span></div>
+  ${verdictHTML(v)}
   <div class="grid">
     <div class="card s12 terrace-wrap">
       <div class="ct">Reisterrassen <span class="hint">${groupLabel(g)} · Wasser = angespartes Kapital der Sparziele je Phase · der Cashflow ist dein Regen</span></div>
@@ -635,11 +706,36 @@ function rBudgets() {
     ...state.wishlist.map(w => `<option value="wish:${esc(w.title)}">Wunsch · ${esc(w.title)}</option>`)
   ].join("");
 
+  const freeCats = Object.keys(state.catMap).filter(c => !cats.includes(c));
+  const addForm = freeCats.length ? `<div class="formgrid">
+      <label>Kategorie<select id="nb-cat">${freeCats.map(c => `<option>${esc(c)}</option>`).join("")}</select></label>
+      <label>SOLL €/Monat<input id="nb-val" type="number" min="1" step="10" placeholder="z. B. 400"></label>
+      <label>&nbsp;<button class="btn" onclick="addBudgetCat()">Budget anlegen</button></label>
+    </div>` : `<div class="small muted">Alle Kategorien haben bereits ein Budget.</div>`;
+
+  if (cats.length === 0) {
+    app.innerHTML = `
+    ${monthPills(selMonth)}
+    <div class="verdict fair">
+      <div style="flex:1;min-width:240px"><span class="headline">Deine ersten Budgets — Bewusstseinsgrenzen, keine Verbote.</span><br>
+      <span class="why">Ein Budget ist kein Deckel, sondern eine Entscheidung: „Ich erlaube mir, X Geld in diesen Lebensbereich fließen zu lassen.“ Starte mit 2–3 Kategorien, die dir wichtig sind — der Betrag darf sich stimmig anfühlen, nicht streng.</span></div>
+    </div>
+    <div class="grid">
+      <div class="card s12 input-surface">
+        <div class="ct">Budget anlegen <span class="hint">gilt ab ${mLabel(selMonth)} und rollt automatisch in die Folgemonate</span></div>
+        ${addForm}
+        <div class="small muted mt" style="line-height:1.6">Tipp aus Kurswoche 3: Wenn du schon Ausgaben erfasst hast, ist der Ø deiner letzten Monate ein ehrlicher Startwert —
+        in der Schutz-Phase lieber leicht aufrunden (Stabilität), Richtung Freiheit leicht abrunden (Überschüsse umleiten).</div>
+      </div>
+    </div>`;
+    return;
+  }
+
   app.innerHTML = `
   ${monthPills(selMonth)}
   <div class="verdict ${vcls}">
-    <span class="headline">${totalSoll === 0 ? `Für ${mLabel(selMonth)} sind keine Budgets gesetzt.` : totalIst <= totalSoll ? `Im Rahmen: ${fmt(totalIst)} von ${fmt(totalSoll)} Budget genutzt.` : `Über Budget: ${fmt(totalIst)} ausgegeben, geplant waren ${fmt(totalSoll)}.`}</span>
-    <span class="why">Budgets sind keine Begrenzung, sondern ein Bewusstseins-Tool: sie lenken dein Geld dorthin, wo es am meisten Wirkung entfaltet.${anyRolled ? " · SOLL rollt automatisch aus dem letzten gesetzten Monat weiter." : ""}</span>
+    <div style="flex:1;min-width:240px"><span class="headline">${totalSoll === 0 ? `Für ${mLabel(selMonth)} sind keine Budgets gesetzt.` : totalIst <= totalSoll ? `Im Rahmen: ${fmt(totalIst)} von ${fmt(totalSoll)} Budget genutzt.` : `Über Budget: ${fmt(totalIst)} ausgegeben, geplant waren ${fmt(totalSoll)}.`}</span><br>
+    <span class="why">Budgets sind keine Begrenzung, sondern ein Bewusstseins-Tool: sie lenken dein Geld dorthin, wo es am meisten Wirkung entfaltet.${anyRolled ? " · SOLL rollt automatisch aus dem letzten gesetzten Monat weiter." : ""}</span></div>
   </div>
   <div class="grid">
     <div class="card s12">
@@ -702,6 +798,11 @@ function rBudgets() {
       </div>
     </div>
 
+    ${freeCats.length ? `<div class="card s12 input-surface">
+      <div class="ct">+ Budget hinzufügen <span class="hint">gilt ab ${mLabel(selMonth)}, rollt automatisch weiter</span></div>
+      ${addForm}
+    </div>` : ""}
+
     ${surplus > 0 ? `<div class="card s6 input-surface">
       <div class="ct">Überschuss lenken <span class="hint">der guided Moment: Ersparnis wird zu Terrassen-Wasser</span></div>
       <div class="small" style="margin-bottom:12px;line-height:1.5">In ${mLabel(selMonth)} sind <b class="pos">${fmt(surplus)}</b> aus deinen Budgets übrig.
@@ -720,9 +821,23 @@ function rBudgets() {
         <label>Notizen<input id="r-notes" value="${esc(refl.notes)}" placeholder="z. B. Sprit, ÖPNV · Mode, Bücher"></label>
         <label>Reflexion<input id="r-refl" value="${esc(refl.reflection)}" placeholder="Was hat dieser Monat über dein Geld erzählt?"></label>
       </div>
-      <div class="mt"><button class="btn" onclick="saveReflection()">Reflexion speichern</button></div>
+      <div class="mt" style="display:flex;gap:10px;flex-wrap:wrap">
+        <button class="btn" onclick="saveReflection()">Reflexion speichern</button>
+        <button class="btn ghost" onclick="exportData()" title="Deine Daten als JSON sichern">⬇ Backup</button>
+      </div>
     </div>
   </div>`;
+}
+
+function addBudgetCat() {
+  const cat = document.getElementById("nb-cat").value;
+  const val = parseFloat(document.getElementById("nb-val").value);
+  if (!cat || !val || val <= 0) { toast("Bitte Kategorie und einen SOLL-Betrag wählen."); return; }
+  if (!state.budgets[cat]) state.budgets[cat] = {};
+  state.budgets[cat][selMonth] = val;
+  saveState(state);
+  toast(`Budget „${cat}“: ${fmt(val)} ab ${mLabel(selMonth)} ✓ — eine bewusste Erlaubnis, kein Deckel.`);
+  render();
 }
 
 function setBudget(cat, val) {
@@ -767,7 +882,7 @@ function saveReflection() {
     reflection: document.getElementById("r-refl").value
   };
   const ok = saveState(state);
-  toast(ok ? "Money-Date-Reflexion gespeichert ✓" : "Speichern fehlgeschlagen.");
+  toast(ok ? "Money-Date-Reflexion gespeichert ✓ — ein ⬇ Backup danach hält deine Daten sicher." : "Speichern fehlgeschlagen.");
 }
 
 /* ================= Wishlist ================= */
@@ -1094,13 +1209,16 @@ function rOnboarding() {
     <div class="ct">Deine Reisterrassen</div>
     <p class="small muted" style="margin-bottom:12px;line-height:1.6">Aus deinen Angaben entstehen drei Meilensteine. Dein monatlicher Cashflow ist der Regen, der sie füllt.</p>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px">
-      ${miniTerrace("1 · Schutz", T.protection.progress, `${fmt(T.protection.value)} von ${fmt(T.protection.goal)}`, `${state.goals.factors.schutz} × ${fmt(T.fix)} Fixkosten — ${PHASE_COPY.Schutz.lead}`)}
-      ${miniTerrace("2 · Sicherheit", T.security.progress, `${fmt(T.security.value)} von ${fmt(T.security.goal)}`, `${state.goals.factors.sicherheit} × Fixkosten — ${PHASE_COPY.Sicherheit.lead}`)}
-      ${miniTerrace("3 · Freiheit", T.freedom.progress, `${fmt(T.freedom.value)} von ${fmt(T.freedom.goal)}`, `${state.goals.factors.freiheit} × Wunschausgaben — ${PHASE_COPY.Freiheit.lead}`)}
+      ${miniTerrace("1 · Schutz", T.protection.progress, T.protection.goal ? `${fmt(T.protection.value)} von ${fmt(T.protection.goal)}` : "entsteht aus deinen Fixkosten", `${state.goals.factors.schutz} × ${fmt(T.fix)} Fixkosten — ${PHASE_COPY.Schutz.lead}`)}
+      ${miniTerrace("2 · Sicherheit", T.security.progress, T.security.goal ? `${fmt(T.security.value)} von ${fmt(T.security.goal)}` : "entsteht aus deinen Fixkosten", `${state.goals.factors.sicherheit} × Fixkosten — ${PHASE_COPY.Sicherheit.lead}`)}
+      ${miniTerrace("3 · Freiheit", T.freedom.progress, T.freedom.goal ? `${fmt(T.freedom.value)} von ${fmt(T.freedom.goal)}` : "entsteht aus deinen Wunschausgaben", `${state.goals.factors.freiheit} × Wunschausgaben — ${PHASE_COPY.Freiheit.lead}`)}
     </div>
-    <p class="small muted mt" style="line-height:1.6">Nächste Schritte: Ausgaben erfasst du unterwegs mit <b>＋ Erfassen</b> (Taste „n“).
-    Deine SOLL-Budgets setzt du auf der Budget-Seite — Woche 3 des Kurses: Ø der letzten Monate als Startwert, dann bewusst kalibrieren.</p>
-    <div class="mt"><button class="btn" onclick="finishOnboarding()">Zur App →</button></div>`;
+    <p class="small muted mt" style="line-height:1.6">Ausgaben erfasst du ab jetzt unterwegs mit <b>＋ Erfassen</b> (Taste „n“).
+    Und als letzten Schritt deines Setups legst du deine ersten Budgets fest — Bewusstseinsgrenzen, keine Verbote.</p>
+    <div class="mt" style="display:flex;gap:10px;flex-wrap:wrap">
+      <button class="btn" onclick="finishOnboarding('budgets')">Budgets festlegen →</button>
+      <button class="btn ghost" onclick="finishOnboarding('dashboard')">Später — zur App</button>
+    </div>`;
   }
 
   app.innerHTML = `${progress}<div class="grid"><div class="card s12 ${obStep > 0 && obStep < 6 ? "input-surface" : ""}" style="max-width:980px">${body}</div></div>`;
@@ -1148,10 +1266,10 @@ function obAddWish() {
 }
 function obDelWish(i) { state.wishlist.splice(i, 1); saveState(state); render(); }
 
-function finishOnboarding() {
+function finishOnboarding(target) {
   state.onboarded = true;
   saveState(state);
-  view = "dashboard";
+  view = target || "dashboard";
   toast("Willkommen — dein System steht. 🌾");
   render();
 }
