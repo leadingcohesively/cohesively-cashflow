@@ -1,0 +1,32 @@
+# Auto-Deploy: Bei jedem Push auf main werden die App-Dateien per FTPS
+# auf den Hetzner-Webspace geladen (z. B. ins Verzeichnis der Subdomain app.cohesively.de).
+#
+# Einmalige Einrichtung im GitHub-Repo unter Settings → Secrets and variables → Actions:
+#   FTP_SERVER      z. B. wpXXX.webpack.hosteurope… bzw. der Hetzner-FTP-Host (siehe KonsoleH)
+#   FTP_USERNAME    FTP-Benutzername des Webspace
+#   FTP_PASSWORD    FTP-Passwort (nur hier eintragen — nie in Dateien oder Chats)
+#   FTP_TARGET_DIR  Zielverzeichnis der Subdomain, mit Slash am Ende, z. B. /app.cohesively.de/
+name: Deploy zu Webspace
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: FTP-Upload
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.FTP_SERVER }}
+          username: ${{ secrets.FTP_USERNAME }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          protocol: ftps
+          server-dir: ${{ secrets.FTP_TARGET_DIR }}
+          exclude: |
+            **/.git*
+            **/.git*/**
+            **/.github/**
+            **/README.md
