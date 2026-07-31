@@ -67,8 +67,31 @@ function groupLabel(g) {
   }
   return GROUPS[g] ? GROUPS[g].label : g;
 }
+/* Solo-/Partner-Erkennung: eine Gruppe ist „aktiv“, wenn sie benannt ist oder Daten hat.
+   Verhindert leere „Person B“-Filter und -Optionen im Solo-Betrieb. */
+function groupHasData(g) {
+  const any = (arr, key) => arr.some(r => inGroup(r[key], g));
+  return any(state.accounts, "owner") || any(state.incomes, "person") || any(state.fixed, "person")
+    || any(state.items, "person") || any(state.business, "person") || any(state.savingGoals, "person");
+}
+function partnerActive() { return !!(state.household && state.household.personB) || groupHasData("Person B"); }
+function familieActive() { return groupHasData("Familie"); }
+
+function activeGroups() {
+  const b = partnerActive(), f = familieActive();
+  const groups = ["Person A"];
+  if (b) groups.push("Person B");
+  if (f) groups.push("Familie");
+  return groups.length > 1 ? ["Gesamt", ...groups] : groups; // „Gesamt“ nur sinnvoll bei >1 Gruppe
+}
+
 function personOptions(sel, withBusiness = true) {
-  const list = withBusiness ? ["Person A", "Person B", "Familie", "Business A", "Business B"] : ["Person A", "Person B", "Familie"];
+  const b = partnerActive();
+  let list = ["Person A"];
+  if (b) list.push("Person B");
+  list.push("Familie");
+  if (withBusiness) { list.push("Business A"); if (b) list.push("Business B"); }
+  if (sel && !list.includes(sel)) list.push(sel); // gewählte Person nie verlieren
   return list.map(p => `<option value="${p}" ${p === sel ? "selected" : ""}>${esc(personLabel(p))}</option>`).join("");
 }
 
@@ -195,6 +218,9 @@ const VIEWS = {
 
 function render() {
   recalcMonths();
+  const ag = activeGroups();
+  if (!ag.includes(group)) group = ag[0];
+  if (!ag.includes(terraceGroup)) terraceGroup = ag[0];
   if (!state.onboarded) view = "onboarding";
   document.querySelectorAll("nav.tabs .pill").forEach(b => b.classList.toggle("active", b.dataset.v === view));
   if (!selMonth) selMonth = latestDataMonth();
@@ -210,8 +236,11 @@ function staleChip() {
 }
 
 function groupPills(current, onclickName) {
+  const groups = activeGroups();
+  if (!groups.includes(current)) { current = groups[0]; if (onclickName === "setGroup") group = current; else if (onclickName === "setTerraceGroup") terraceGroup = current; }
+  if (groups.length < 2) return ""; // Solo ohne weitere Gruppen: kein Filter nötig
   return `<div class="selrow"><span class="lbl">Ansicht</span>` +
-    Object.keys(GROUPS).map(k => `<button class="pill ${current === k ? "active" : ""}" onclick="${onclickName}('${k}')">${esc(groupLabel(k))}</button>`).join("") + `</div>`;
+    groups.map(k => `<button class="pill ${current === k ? "active" : ""}" onclick="${onclickName}('${k}')">${esc(groupLabel(k))}</button>`).join("") + `</div>`;
 }
 function setGroup(g) { group = g; render(); }
 function setTerraceGroup(g) { terraceGroup = g; render(); }
@@ -803,7 +832,16 @@ function rBudgets() {
       ${addForm}
     </div>` : ""}
 
-    ${surplus > 0 ? `<div class="card s6 input-surface">
+    ${surplus > 0 && state.accounts.length && !pots ? `<div class="card s6 input-surface">
+      <div class="ct">Überschuss lenken <span class="hint">der guided Moment</span></div>
+      <div class="small" style="line-height:1.5">In ${mLabel(selMonth)} sind <b class="pos">${fmt(surplus)}</b> aus deinen Budgets übrig.
+        Lege ein Sparziel oder einen Wunsch an — dann kannst du diesen Überschuss gezielt dorthin lenken, statt ihn zu verlieren.</div>
+      <div class="mt" style="display:flex;gap:10px;flex-wrap:wrap">
+        <button class="btn" onclick="setView('terrassen')">Sparziel anlegen →</button>
+        <button class="btn ghost" onclick="setView('wishlist')">Wunsch anlegen →</button>
+      </div>
+    </div>` : ""}
+    ${surplus > 0 && state.accounts.length && pots ? `<div class="card s6 input-surface">
       <div class="ct">Überschuss lenken <span class="hint">der guided Moment: Ersparnis wird zu Terrassen-Wasser</span></div>
       <div class="small" style="margin-bottom:12px;line-height:1.5">In ${mLabel(selMonth)} sind <b class="pos">${fmt(surplus)}</b> aus deinen Budgets übrig.
         Was davon darf in einen Spartopf fließen?</div>
@@ -981,39 +1019,57 @@ function rBookings() {
   const accRows = state.accounts.map(r => `<tr><td>${esc(r.name)}</td><td>${esc(r.type)}</td><td>${esc(r.owner)}</td><td class="num ${r.balance < 0 ? "neg" : ""}">${fmt(r.balance, true)}</td></tr>`).join("");
 
   const cats = Object.keys(state.catMap);
+  const bizCats = Object.keys(state.bizCatMap);
   const accounts = state.accounts.map(a => a.name);
-  const isGoal = formType === "goal";
+  const hasPots = state.savingGoals.length + state.wishlist.length > 0;
+  // Typen, die ohne Konto sinnlos sind, werden erst nach Konto-Anlage angeboten
+  const noAccounts = accounts.length === 0;
+  const isGoal = formType === "goal" && hasPots;
+  const isBusiness = formType === "business";
+  const catList = isBusiness ? bizCats : cats;
   const goalOptions = [
     ...state.savingGoals.map(s => `<option value="goal:${esc(s.name)}">Sparziel · ${esc(s.name)}</option>`),
     ...state.wishlist.map(w => `<option value="wish:${esc(w.title)}">Wunsch · ${esc(w.title)}</option>`)
   ].join("");
 
-  app.innerHTML = `
-  <div class="grid">
-    <div class="card s12 input-surface">
+  const formCard = noAccounts
+    ? `<div class="card s12 input-surface">
+        <div class="ct">Neue Buchung</div>
+        <p class="small" style="line-height:1.6;margin-bottom:12px">Bevor du buchen kannst, brauchst du mindestens ein Konto —
+        so lässt sich später nachvollziehen, wohin dein Geld fließt.</p>
+        <button class="btn" onclick="setView('daten')">Erstes Konto anlegen →</button>
+      </div>`
+    : `<div class="card s12 input-surface">
       <div class="ct">Neue Buchung <span class="hint">wird lokal gespeichert (localStorage) — kein Server, deine Daten bleiben bei dir</span></div>
       <div class="formgrid">
         <label>Typ<select id="f-type" onchange="setFormType(this.value)">
           <option value="item" ${formType === "item" ? "selected" : ""}>Variable Ausgabe</option>
           <option value="income" ${formType === "income" ? "selected" : ""}>Einnahme</option>
           <option value="fixed" ${formType === "fixed" ? "selected" : ""}>Fixkosten</option>
-          <option value="goal" ${formType === "goal" ? "selected" : ""}>Einzahlung auf Ziel/Wunsch</option>
+          <option value="business" ${formType === "business" ? "selected" : ""}>Business-Ausgabe</option>
+          ${hasPots ? `<option value="goal" ${formType === "goal" ? "selected" : ""}>Einzahlung auf Ziel/Wunsch</option>` : ""}
           <option value="transfer" ${formType === "transfer" ? "selected" : ""}>Transfer</option>
         </select></label>
         <label>Monat<input id="f-month" type="month" value="${NOW_MONTH}"></label>
         <label>Betrag €<input id="f-amount" type="number" step="0.01" min="0" placeholder="0,00"></label>
         ${isGoal
           ? `<label>Ziel / Wunsch<select id="f-goal">${goalOptions}</select></label>`
-          : `<label>Titel<input id="f-title" placeholder="z. B. Lebensmittel"></label>
-             <label>Kategorie<select id="f-cat">${cats.map(c => `<option>${esc(c)}</option>`).join("")}</select></label>`}
-        <label>Person<select id="f-person">${personOptions(state.ui.lastPerson)}</select></label>
-        <label>Konto<select id="f-account">${accounts.map(a => `<option>${esc(a)}</option>`).join("")}</select></label>
+          : `<label>Titel<input id="f-title" placeholder="${isBusiness ? "z. B. Software-Abo" : "z. B. Lebensmittel"}"></label>
+             <label>Kategorie<select id="f-cat">${catList.map(c => `<option>${esc(c)}</option>`).join("")}</select></label>`}
+        <label>Person<select id="f-person">${personOptions(isBusiness ? "Business A" : state.ui.lastPerson)}</select></label>
+        <label>Konto<select id="f-account">${accounts.map(a => `<option ${a === state.ui.lastAccount ? "selected" : ""}>${esc(a)}</option>`).join("")}</select></label>
         <label>&nbsp;<button class="btn" onclick="addBooking()">Speichern</button></label>
       </div>
       <div class="small muted mt">${isGoal
         ? "Die Einzahlung wird als Transfer gebucht (kein Cashflow) und erhöht automatisch den Stand des Ziels — wie die Relationen in deinem Notion."
+        : isBusiness
+        ? "Betriebsausgaben laufen getrennt von privat und fließen in die Business-Auswertung. Der Bucket wird aus der Business-Kategorie gemappt."
         : "Der Bucket (Needs/Savings/Wealth/Wants) wird automatisch aus der Kategorie gemappt — wie im Sheet. Jeder Eintrag ist eine bewusste Entscheidung."}</div>
-    </div>
+    </div>`;
+
+  app.innerHTML = `
+  <div class="grid">
+    ${formCard}
 
     <div class="card s12">
       <div class="ct">Alle Daten <span class="hint">die Eingabe-Schicht deines Sheets, 1:1 übernommen</span></div>
@@ -1052,12 +1108,20 @@ function delRow(kind, i) {
 
 function addBooking() {
   const $ = id => document.getElementById(id);
-  const type = formType, month = $("f-month").value, amount = parseFloat($("f-amount").value);
+  const el = $("f-amount");
+  if (!el) { toast("Bitte zuerst ein Konto anlegen."); return; }
+  const type = formType, month = $("f-month").value, amount = parseFloat(el.value);
   const person = $("f-person").value, account = $("f-account").value;
   if (!month || !amount || amount <= 0) { toast("Bitte Monat und Betrag angeben."); return; }
 
   if (type === "goal") {
-    if (!depositToPot($("f-goal").value, amount, person, account, month)) { toast("Ziel nicht gefunden."); return; }
+    const g = $("f-goal");
+    if (!g || !g.value) { toast("Lege zuerst ein Sparziel oder einen Wunsch an."); return; }
+    if (!depositToPot(g.value, amount, person, account, month)) { toast("Ziel nicht gefunden."); return; }
+  } else if (type === "business") {
+    const cat = $("f-cat") ? $("f-cat").value : Object.keys(state.bizCatMap)[0];
+    const bucket = state.bizCatMap[cat] || "Needs";
+    state.business.push({ month, amount, title: $("f-title").value.trim() || cat, cat, bucket, freq: "einmalig", monthly: 0, account, person });
   } else {
     const title = $("f-title").value.trim(), cat = $("f-cat") ? $("f-cat").value : "Lebenshaltung";
     const bucket = state.catMap[cat] || "Wants";
@@ -1066,6 +1130,7 @@ function addBooking() {
     else if (type === "transfer") state.transfers.push({ date: month + "-01", month, amount, fromAcc: account, toAcc: account, bucket: "Savings", person, purpose: title || "Umbuchung" });
     else state.items.push({ month, amount, title: title || cat, cat, bucket, source: "Einmalige Ausgabe", account, person });
   }
+  state.ui.lastPerson = person; state.ui.lastAccount = account;
   const ok = saveState(state);
   toast(ok ? "Gespeichert ✓ — " + fmt(amount, true) + " in " + mLabel(month) : "Speichern fehlgeschlagen — Änderung nur in dieser Sitzung.");
   render();
@@ -1584,6 +1649,17 @@ function openQA() {
   const qa = document.getElementById("qa");
   const cats = Object.keys(state.catMap);
   const accounts = state.accounts.map(a => a.name);
+  if (!accounts.length) {
+    qa.innerHTML = `<div class="ct" style="margin-bottom:10px">Ausgabe erfassen</div>
+      <p class="small" style="line-height:1.6;margin-bottom:12px">Du hast noch kein Konto. Lege zuerst eins an — dann kannst du hier in Sekunden erfassen.</p>
+      <div class="row" style="margin-bottom:0">
+        <button class="btn" style="flex:1" onclick="closeQA();setView('daten')">Konto anlegen →</button>
+        <button class="btn ghost" onclick="closeQA()">Esc</button>
+      </div>`;
+    qa.classList.add("open");
+    qa.onkeydown = e => { if (e.key === "Escape") closeQA(); };
+    return;
+  }
   qa.innerHTML = `
     <div class="ct" style="margin-bottom:10px">Ausgabe erfassen <span class="hint">bewusst, statt automatisch</span></div>
     <div class="row"><input id="qa-amount" class="amount" inputmode="decimal" placeholder="0,00 €" autocomplete="off"></div>
