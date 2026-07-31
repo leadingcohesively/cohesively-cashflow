@@ -227,6 +227,7 @@ function render() {
   ({ dashboard: rDashboard, terrassen: rTerraces, cashflow: rCashflow, budgets: rBudgets, wishlist: rWishlist, buchungen: rBookings, daten: rData, onboarding: rOnboarding })[view]();
   animateCounts();
   document.getElementById("staleChip").outerHTML = staleChip();
+  if (celebrate) { const n = celebrate; celebrate = null; setTimeout(() => toast(`🌾 Geschafft — „${n}“ ist erreicht! Ein Meilenstein deiner Reisterrassen.`), 200); }
 }
 
 function staleChip() {
@@ -576,22 +577,62 @@ function gauge(p, label) {
   </div>`;
 }
 
+let editingGoal = -1;
+
 function goalRow(s) {
   const saved = goalSaved(s);
   const p = s.target ? clamp(saved / s.target, 0, 1) : null;
   const statusCls = s.status === "erreicht" ? "excellent" : s.status === "aktiv" ? "good" : s.status === "pausiert" ? "fair" : "poor";
   const idx = state.savingGoals.indexOf(s);
+
+  if (idx === editingGoal) {
+    return `<div class="tile input-surface" style="margin-bottom:10px">
+      <div class="formgrid">
+        <label>Name<input id="eg-name" value="${esc(s.name)}"></label>
+        <label>Zielbetrag €<input id="eg-target" type="number" min="0" value="${s.target || ""}" placeholder="optional"></label>
+        <label>Sparrate €/Monat<input id="eg-rate" type="number" min="0" value="${s.rate || ""}"></label>
+        <label>Phase<select id="eg-phase"><option value="">– offen –</option>${PHASES.map(ph => `<option ${ph === s.phase ? "selected" : ""}>${ph}</option>`).join("")}</select></label>
+        <label>Status<select id="eg-status">${["offen", "aktiv", "pausiert", "erreicht"].map(st => `<option ${st === s.status ? "selected" : ""}>${st}</option>`).join("")}</select></label>
+        <label>Intention — Mein Why<input id="eg-why" value="${esc(s.intention || "")}"></label>
+      </div>
+      <div class="mt" style="display:flex;gap:8px">
+        <button class="btn" onclick="saveGoalEdit(${idx})">Speichern</button>
+        <button class="btn ghost" onclick="editingGoal=-1;render()">Abbrechen</button>
+      </div>
+    </div>`;
+  }
+
   return `<div class="tile" style="margin-bottom:10px">
     <div style="display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap">
       <span style="font-weight:700">${esc(s.name)} <span class="small muted" style="font-weight:400">· ${esc(s.person || "Familie")}</span></span>
       <span class="small muted">${fmt(saved)}${s.target ? " / " + fmt(s.target) : ""}${s.rate ? ` · ${fmt(s.rate)}/M Sparrate` : ""}
         <span class="badge ${statusCls}" style="margin-left:6px">${esc(s.status)}</span>
+        <button class="pill" style="padding:2px 9px;font-size:11px" onclick="editingGoal=${idx};render()" title="Sparziel bearbeiten">✎</button>
         <button class="pill" style="padding:2px 9px;font-size:11px" onclick="delGoal(${idx})" title="Sparziel löschen">✕</button>
       </span>
     </div>
     ${p == null ? `<div class="small muted" style="margin-top:6px">kein Zielbetrag gesetzt</div>` : `<div class="hbar" style="margin-top:8px"><i class="${semClass(p)}" style="width:${p * 100}%"></i></div>`}
     ${s.intention ? `<div class="small" style="margin-top:7px;color:var(--accent2)">☼ ${esc(s.intention)}</div>` : `<div class="small muted" style="margin-top:7px">Kein „Mein Why“ hinterlegt — die Intention trägt das Ziel.</div>`}
   </div>`;
+}
+
+function saveGoalEdit(idx) {
+  const s = state.savingGoals[idx];
+  if (!s) return;
+  const $ = id => document.getElementById(id);
+  const name = $("eg-name").value.trim();
+  if (!name) { toast("Bitte einen Namen angeben."); return; }
+  s.name = name;
+  s.target = parseFloat($("eg-target").value) || null;
+  s.rate = parseFloat($("eg-rate").value) || 0;
+  s.phase = $("eg-phase").value || null;
+  s.status = $("eg-status").value;
+  s.intention = $("eg-why").value.trim();
+  if (s.target && goalSaved(s) >= s.target && s.status !== "erreicht") { s.status = "erreicht"; celebrate = s.name; }
+  editingGoal = -1;
+  saveState(state);
+  toast("Sparziel aktualisiert ✓");
+  render();
 }
 
 function terraceCard(key, T, sub) {
@@ -736,11 +777,13 @@ function rBudgets() {
   ].join("");
 
   const freeCats = Object.keys(state.catMap).filter(c => !cats.includes(c));
+  const firstAvg = freeCats.length ? avgSpent(freeCats[0]) : 0;
   const addForm = freeCats.length ? `<div class="formgrid">
-      <label>Kategorie<select id="nb-cat">${freeCats.map(c => `<option>${esc(c)}</option>`).join("")}</select></label>
-      <label>SOLL €/Monat<input id="nb-val" type="number" min="1" step="10" placeholder="z. B. 400"></label>
+      <label>Kategorie<select id="nb-cat" onchange="budgetSuggest()">${freeCats.map(c => `<option>${esc(c)}</option>`).join("")}</select></label>
+      <label>SOLL €/Monat<input id="nb-val" type="number" min="1" step="10" value="${firstAvg || ""}" placeholder="z. B. 400"></label>
       <label>&nbsp;<button class="btn" onclick="addBudgetCat()">Budget anlegen</button></label>
-    </div>` : `<div class="small muted">Alle Kategorien haben bereits ein Budget.</div>`;
+    </div>
+    <div id="nb-hint" class="small muted mt">${budgetSuggestHint(freeCats[0])}</div>` : `<div class="small muted">Alle Kategorien haben bereits ein Budget.</div>`;
 
   if (cats.length === 0) {
     app.innerHTML = `
@@ -867,6 +910,28 @@ function rBudgets() {
   </div>`;
 }
 
+/* Ø-Ausgaben einer Kategorie über die letzten (bis zu 3) Monate mit Daten — Kurswoche-3-Startwert */
+function avgSpent(cat) {
+  const ms = dataMonths().slice(-3);
+  const withData = ms.filter(m => state.items.some(i => i.cat === cat && i.month === m));
+  if (!withData.length) return 0;
+  const sum = withData.reduce((s, m) => s + state.items.filter(i => i.cat === cat && i.month === m).reduce((a, i) => a + i.amount, 0), 0);
+  return Math.round(sum / withData.length / 10) * 10; // auf 10 € gerundet
+}
+function budgetSuggestHint(cat) {
+  const avg = avgSpent(cat);
+  return avg
+    ? `Vorschlag ${fmt(avg)} = dein Ø der letzten Monate für „${esc(cat)}“. In der Schutz-Phase lieber leicht aufrunden (Stabilität), Richtung Freiheit abrunden (Überschüsse umleiten) — der Betrag darf sich stimmig anfühlen.`
+    : `Für „${esc(cat)}“ liegen noch keine Ausgaben vor — wähle einen Betrag, der sich für dich stimmig anfühlt.`;
+}
+function budgetSuggest() {
+  const cat = document.getElementById("nb-cat").value;
+  const avg = avgSpent(cat);
+  const val = document.getElementById("nb-val");
+  val.value = avg || "";
+  document.getElementById("nb-hint").innerHTML = budgetSuggestHint(cat);
+}
+
 function addBudgetCat() {
   const cat = document.getElementById("nb-cat").value;
   const val = parseFloat(document.getElementById("nb-val").value);
@@ -888,16 +953,20 @@ function setBudget(cat, val) {
 }
 
 /* Einzahlung in Sparziel oder Wunsch — gemeinsame Logik für Buchungsform & Überschuss-Flow */
+let celebrate = null; // Name eines gerade erreichten Ziels/Wunsches → Feier-Moment nach Render
+
 function depositToPot(potValue, amount, person, account, month) {
   const [kind, name] = potValue.split(/:(.+)/);
   if (kind === "goal") {
     const goal = state.savingGoals.find(s => s.name === name);
     if (!goal) return false;
     goal.savedManual = (goal.savedManual || 0) + amount;
+    if (goal.target && goalSaved(goal) >= goal.target && goal.status !== "erreicht") { goal.status = "erreicht"; celebrate = goal.name; }
   } else {
     const wish = state.wishlist.find(w => w.title === name);
     if (!wish) return false;
     wish.saved += amount; wish.status = "saving";
+    if (wish.saved >= wish.target) celebrate = wish.title;
   }
   state.transfers.push({ date: month + "-01", month, amount, fromAcc: account, toAcc: account, bucket: "Savings", person, purpose: "Einzahlung " + name, goal: name });
   return true;
@@ -938,12 +1007,13 @@ function rWishlist() {
           <button class="pill" style="padding:1px 8px;font-size:11px" onclick="delWish(${idx})" title="Wunsch löschen">✕</button>
         </div>
         <div class="value" data-count="${w.saved}">0</div>
-        <div class="subline">von ${fmt(w.target)} · <span class="delta ${w.status === "saving" ? "up" : "down"}">${w.status === "saving" ? "spart" : "wartet"}</span>
+        <div class="subline">von ${fmt(w.target)} · <span class="delta ${w.status === "saving" || w.status === "gekauft" ? "up" : "down"}">${w.status === "gekauft" ? "gekauft" : w.status === "saving" ? "spart" : "wartet"}</span>
           ${w.timeframe ? `<span class="delta up" style="background:rgba(56,249,215,0.12);color:var(--accent2)">${esc(w.timeframe)}</span>` : ""}</div>
         <div class="hbar" style="margin-top:10px"><i class="${cls}" style="width:${p * 100}%"></i></div>
         ${w.intention ? `<div class="small" style="margin-top:8px;color:var(--accent2)">☼ ${esc(w.intention)}</div>` : ""}
-        <div class="note">${p >= 1 ? "Bereit zum Kauf ✓" : fmt(w.target - w.saved) + " fehlen noch."}
+        <div class="note">${w.status === "gekauft" ? "Gekauft 🎉" : p >= 1 ? "Bereit zum Kauf ✓" : fmt(w.target - w.saved) + " fehlen noch."}
           ${host ? ` · <a href="${esc(w.url)}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(host)} ↗</a>` : ""}</div>
+        ${p >= 1 && w.status !== "gekauft" ? `<button class="btn mt" style="width:100%" onclick="buyWish(${idx})">Als gekauft buchen</button>` : ""}
       </div>`;
     }).join("")}
 
@@ -979,6 +1049,20 @@ function delWish(idx) {
   saveState(state); toast(`„${w.title}“ gelöscht.`); render();
 }
 
+/* Wunsch-Kauf-Flow schließt die Belohnungsschleife: bucht den Kauf als Ausgabe
+   (Quelle „Kauf aus Wishlist“) und markiert den Wunsch als gekauft — belastet
+   kein laufendes Monatsbudget, weil vorher gespart wurde. */
+function buyWish(idx) {
+  const w = state.wishlist[idx];
+  if (!w || w.saved < w.target) return;
+  const acc = (state.accounts.find(a => a.type === "Tagesgeld") || state.accounts[0] || {}).name || "";
+  state.items.push({ month: NOW_MONTH, amount: w.target, title: w.title, cat: "Anschaffungen", bucket: "Wants", source: "Kauf aus Wishlist", account: acc, person: state.ui.lastPerson || "Person A" });
+  w.status = "gekauft"; w.saved = 0;
+  saveState(state);
+  toast(`🎉 „${w.title}“ gekauft — aus deinem Spartopf, ohne dein Monatsbudget zu belasten.`);
+  render();
+}
+
 /* ================= Sparziele: Aktionen ================= */
 function addGoal() {
   const $ = id => document.getElementById(id).value;
@@ -1011,10 +1095,13 @@ function rBookings() {
   const table = (heads, rows) => `<div class="scroll-x"><table class="data"><tr>${heads.map(h => `<th class="${h.n ? "num" : ""}">${h.t}</th>`).join("")}</tr>${rows}</table></div>`;
 
   const del = (kind, i) => `<td><button class="pill" style="padding:1px 8px" title="Buchung löschen" onclick="delRow('${kind}',${i})">✕</button></td>`;
-  const incRows = state.incomes.map((r, i) => `<tr><td>${r.month}</td><td class="num">${fmt(r.amount, true)}</td><td>${esc(r.title)}</td><td>${esc(r.freq)}</td><td>${esc(personLabel(r.person))}</td><td class="muted">${esc(r.account)}</td>${del("incomes", i)}</tr>`).join("");
-  const fixRows = state.fixed.map((r, i) => `<tr><td>${r.month}</td><td class="num">${fmt(r.amount, true)}</td><td>${esc(r.title)}</td><td>${esc(r.cat)}</td><td>${esc(r.bucket)}</td><td>${esc(r.freq)}</td><td class="num muted">${fmt(r.monthly, true)}</td><td>${esc(personLabel(r.person))}</td>${del("fixed", i)}</tr>`).join("");
-  const itemRows = state.items.map((r, i) => `<tr><td>${r.month}</td><td class="num">${fmt(r.amount, true)}</td><td>${esc(r.title)}</td><td>${esc(r.cat)}</td><td>${esc(r.bucket)}</td><td class="muted">${esc(r.source || "–")}</td><td>${esc(personLabel(r.person))}</td>${del("items", i)}</tr>`).join("");
-  const bizRows = state.business.map((r, i) => `<tr><td>${r.month}</td><td class="num">${fmt(r.amount, true)}</td><td>${esc(r.title)}</td><td>${esc(r.cat)}</td><td>${esc(r.freq)}</td><td>${esc(personLabel(r.person))}</td>${del("business", i)}</tr>`).join("");
+  const eAmt = (kind, i, v) => `<td class="num"><input type="number" step="0.01" value="${v}" style="width:92px;text-align:right" onchange="editRow('${kind}',${i},'amount',this.value)"></td>`;
+  const eTitle = (kind, i, v) => `<td><input value="${esc(v || "")}" style="width:130px" onchange="editRow('${kind}',${i},'title',this.value)"></td>`;
+  const eCat = (kind, i, v, map) => `<td><select onchange="editRow('${kind}',${i},'cat',this.value)">${Object.keys(map).map(c => `<option ${c === v ? "selected" : ""}>${esc(c)}</option>`).join("")}</select></td>`;
+  const incRows = state.incomes.map((r, i) => `<tr><td>${r.month}</td>${eAmt("incomes", i, r.amount)}${eTitle("incomes", i, r.title)}<td>${esc(r.freq)}</td><td>${esc(personLabel(r.person))}</td><td class="muted">${esc(r.account)}</td>${del("incomes", i)}</tr>`).join("");
+  const fixRows = state.fixed.map((r, i) => `<tr><td>${r.month}</td>${eAmt("fixed", i, r.amount)}${eTitle("fixed", i, r.title)}${eCat("fixed", i, r.cat, state.catMap)}<td>${esc(r.bucket)}</td><td>${esc(r.freq)}</td><td class="num muted">${fmt(r.monthly, true)}</td><td>${esc(personLabel(r.person))}</td>${del("fixed", i)}</tr>`).join("");
+  const itemRows = state.items.map((r, i) => `<tr><td>${r.month}</td>${eAmt("items", i, r.amount)}${eTitle("items", i, r.title)}${eCat("items", i, r.cat, state.catMap)}<td>${esc(r.bucket)}</td><td class="muted">${esc(r.source || "–")}</td><td>${esc(personLabel(r.person))}</td>${del("items", i)}</tr>`).join("");
+  const bizRows = state.business.map((r, i) => `<tr><td>${r.month}</td>${eAmt("business", i, r.amount)}${eTitle("business", i, r.title)}${eCat("business", i, r.cat, state.bizCatMap)}<td>${esc(r.freq)}</td><td>${esc(personLabel(r.person))}</td>${del("business", i)}</tr>`).join("");
   const trRows = state.transfers.map((r, i) => `<tr><td>${r.month || "–"}</td><td class="num">${fmt(r.amount, true)}</td><td class="muted">${esc(r.fromAcc)}</td><td>→ ${esc(r.toAcc)}</td><td>${esc(r.bucket)}</td><td>${esc(r.purpose)}${r.goal ? ` <span class="delta up">→ ${esc(r.goal)}</span>` : ""}</td>${del("transfers", i)}</tr>`).join("");
   const accRows = state.accounts.map(r => `<tr><td>${esc(r.name)}</td><td>${esc(r.type)}</td><td>${esc(r.owner)}</td><td class="num ${r.balance < 0 ? "neg" : ""}">${fmt(r.balance, true)}</td></tr>`).join("");
 
@@ -1086,6 +1173,25 @@ function rBookings() {
       <button class="btn ghost" onclick="setView('daten')">Zur Daten-Seite</button>
     </div>
   </div>`;
+}
+
+/* Buchung inline bearbeiten — gleiches Muster wie die Salden auf der Daten-Seite:
+   mutieren + speichern ohne Voll-Render (behält Fokus & offenes Accordion). */
+function editRow(kind, i, field, value) {
+  const r = state[kind][i];
+  if (!r) return;
+  if (field === "amount") {
+    r.amount = parseFloat(value) || 0;
+    if (r.freq === "monatlich" && r.monthly !== undefined) r.monthly = r.amount;
+  } else if (field === "cat") {
+    r.cat = value;
+    const map = kind === "business" ? state.bizCatMap : state.catMap;
+    r.bucket = map[value] || r.bucket;
+  } else {
+    r[field] = value;
+  }
+  saveState(state);
+  toast("Änderung gespeichert ✓");
 }
 
 /* Buchung löschen — bei Ziel-Transfers wird der Spartopf-Stand zurückgerechnet */
