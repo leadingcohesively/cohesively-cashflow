@@ -10,4 +10,5 @@ ONBOARDING-FLOW.md
 *.docx
 *.zip
 BACKLOG.md
-ANALYSE_*.md
+*ANALYSE*.md
+SCOPING.md
